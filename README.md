@@ -5,7 +5,7 @@ We used the Hotel Booking Demand dataset found on Kaggle to predict whether the 
 
 - R Code: 
 
- * Association Rules, KNN, and Random Forests: https://github.com/shihyuanwang/Hotel_Booking_Cancellation_Prediction/blob/main/Hotel%20Booking%20Cancellation_Association_KNN_RF.Rmd
+ *Association Rules, KNN, and Random Forests: https://github.com/shihyuanwang/Hotel_Booking_Cancellation_Prediction/blob/main/Hotel%20Booking%20Cancellation_Association_KNN_RF.Rmd
 
  *Logistic Regression and Classification Trees: https://github.com/shihyuanwang/Hotel_Booking_Cancellation_Prediction/blob/main/Hotel%20Booking%20Cancellation_LogisticRegression_and_ClassificationTree.Rmd
 
