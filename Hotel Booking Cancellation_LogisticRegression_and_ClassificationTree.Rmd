@@ -1,0 +1,311 @@
+---
+title: "Hotel Booking Cancellation Prediction - Logistic Regression and Classification Trees"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import Libraries
+
+```{r}
+library(corrplot)
+library(MASS)
+library(tree)
+library(pROC)
+```
+
+
+
+## Read in data
+
+
+```{r cars}
+setwd("D:/Wisconsin/Semester 2/OTM 714 Supply Chain Analytics/Final")
+rm(list = ls())
+data <- read.csv("hotel_bookings.csv")
+
+#Conver all NULL to NA
+data[data == "NULL"] <- NA
+
+#Take a look at the structure of the data
+str(data)
+sapply(data, function(x) sum(is.na(x)))
+```
+
+## Data Cleaning and Manipulation
+
+Noticed that certain variables should be factor variables.
+Country, children, agent, and company have NA value.
+Here we assume that children with NA value is 0
+Since the company, agent and country have huge amount of NAs, therefore, we drop it
+Also, add a new column to illustrate whether reserved room type is the same as assigned room type (1 if equal, 0 otherwise)
+
+
+```{r}
+#Change the char varaibles to factor variables
+data$hotel <- as.factor(data$hotel)
+data$arrival_date_year <- as.factor(data$arrival_date_year)
+data$arrival_date_month <- as.factor(data$arrival_date_month)
+data$arrival_date_week_number <- as.factor(data$arrival_date_week_number)
+data$arrival_date_day_of_month <- as.factor(data$arrival_date_day_of_month)
+data$meal <- as.factor(data$meal)
+data$country <- as.factor(data$country)
+data$market_segment <- as.factor(data$market_segment)
+data$distribution_channel <- as.factor(data$distribution_channel)
+data$deposit_type <- as.factor(data$deposit_type)
+data$agent <- as.factor(data$agent)
+data$customer_type <- as.factor(data$customer_type)
+#data$reservation_status <- as.factor(data$reservation_status)
+
+# #seperate reservation status date into year month and day into different columns 
+# #and convert them in to factor
+# date_list <- as.POSIXlt(data$reservation_status_date, format = "%Y-%m-%d")
+# data$reservation_status_date_year <- date_list$year+1900
+# data$reservation_status_date_month <- date_list$mon
+# data$reservation_status_date_mday <- date_list$mday
+# data$reservation_status_date_year <- as.factor(data$reservation_status_date_year)
+# data$reservation_status_date_month <- as.factor(data$reservation_status_date_month)
+# data$reservation_status_date_mday <- as.factor(data$reservation_status_date_mday)
+
+#convert Nulls in Children to 0
+data$children[is.na(data$children)] <- 0
+
+#New column to illustrate room type difference
+data$room_type_diff <- ifelse(data$reserved_room_type == data$assigned_room_type,1,0)
+
+#convert undefined meal to SC
+data$meal[data$meal == "Undefined"] <- "SC"
+
+#Drop rows
+data <- data[!(data$market_segment == "Undefined" | data$distribution_channel == "Undefined"),]
+
+#Drop company column and original reservation status date
+drop = c("company","reservation_status_date","reserved_room_type","assigned_room_type","agent","country","reservation_status")
+data <- data[,!(names(data) %in% drop)]
+
+str(data)
+
+
+```
+
+Up to this point, we have converted all vairables and eliminated NAs except for "agent"
+Notice that we have value "undefined" in several variables
+-- meal
+-- market_segment
+-- distribution_channel
+1208 observations of value "no show" for "reservation_satus", keep it as is.
+Convert "Undefined" value in meal to "SC"
+and simple just drop rows that the value of market_segment and distribution_channel are "undefined"
+
+
+## Explore Data
+
+ 
+```{r}
+#------------------------------------------------------------------------------
+# Correlations
+#------------------------------------------------------------------------------
+
+str(data)
+
+# numerical variables
+
+data_numcols <- data[, sapply(data, is.numeric)]
+data_faccols <- data[, sapply(data, is.factor)]
+
+correlations <- cor(data_numcols)
+corrplot(correlations,method = "circle")
+```
+It looks like the numeric variables do not have much correlations with each other
+
+## Logistic Regression
+
+```{r}
+# set random seed
+set.seed(123)
+
+# Let's choose 75% training and 25% test sets
+trainfract<-0.75
+#validfract<-0.2
+testfract<-0.25
+
+sampleSizeTraining <- floor(trainfract*nrow(data))
+#sampleSizeValidation <- floor(validfract*nrow(data))
+sampleSizeTest <- nrow(data)-sampleSizeTraining
+
+indicesTraining <- sort(sample(seq_len(nrow(data)), size=sampleSizeTraining))
+indicesNotTraining <- setdiff(seq_len(nrow(data)), indicesTraining)
+#indicesValidation  <- sort(sample(indicesNotTraining, size=sampleSizeValidation))
+indicesTest        <- sort(sample(indicesNotTraining, size=sampleSizeTest))
+
+train_data <- data[indicesTraining, ]
+#valid_data <- data[indicesValidation, ]
+test_data <- data[indicesTest, ]
+
+```
+
+```{r}
+# model with all variables
+LR <- glm(formula=is_canceled ~ ., data = train_data, family=binomial())
+
+# summary the model AIC = 74361
+summary(LR)
+```
+
+
+Let's try an automated method of variable selection
+```{r}
+#stepAIC(LR, direction="both")
+
+```
+
+```{r}
+#Generate Auto_LR Model
+Auto_LR <- glm(formula=is_canceled ~ hotel + lead_time + arrival_date_year + 
+    arrival_date_month + arrival_date_week_number + arrival_date_day_of_month + 
+    stays_in_weekend_nights + stays_in_week_nights + adults + 
+    children + babies + meal + market_segment + distribution_channel + 
+    is_repeated_guest + previous_cancellations + previous_bookings_not_canceled + 
+    booking_changes + deposit_type + customer_type + adr + required_car_parking_spaces + 
+    total_of_special_requests + room_type_diff, data = train_data, family=binomial())
+
+summary(Auto_LR)
+```
+
+
+
+## Make Prediction on Test dataset using Auto_LR model
+
+```{r}
+
+# Now let's generate prediction
+test_data$predict_signif_Auto <- ifelse(predict(Auto_LR,test_data, type="response")>0.5, 1, 0)
+# Now let's create a confusion matrix
+pred_sig_test_Auto <- test_data$predict_signif_Auto
+actual_test<-test_data$is_canceled
+confusion_signif_Auto  <- table(pred_sig_test_Auto, actual_test)
+confusion_signif_Auto
+
+```
+
+## Examine model accuracy
+
+```{r}
+# Overall accuracy
+allacc <- function(yhat, y)  { (sum(yhat==y) / sum(y==0 | y==1)) }
+
+# True Positive Rate, Sensitivity
+TPR <- function(yhat, y)  { sum(yhat==1 & y==1 ) / sum(y==1) }
+
+# True Negative Rate, Specificity
+TNR <- function(yhat, y)  { sum(yhat==0 & y==0) / sum(y==0) }
+
+#Overall Accuracy
+print("The overall accuracy is:")
+allacc(pred_sig_test_Auto, actual_test)
+
+#TPR
+print("The TPR is:")
+TPR(pred_sig_test_Auto, actual_test)
+
+#TNR
+print("The TNR is:")
+TNR(pred_sig_test_Auto, actual_test)
+
+#Create ROC curve for test dataset result
+ROC_test <- roc(test_data$is_canceled,predict(Auto_LR,test_data, type="response"))
+
+# Plot the ROC curve
+plot(ROC_test, col = 'blue')
+
+# Calculate the area under the curve (AUC)
+auc(ROC_test)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Classification Tree
+
+Since the tree model can only take at most 32 levels, therefore, we need to drop "arrival_date_week_number"
+
+```{r}
+drop2 = c("arrival_date_week_number")
+train_data <- train_data[,!(names(train_data) %in% drop2)]
+test_data <- test_data[,!(names(test_data) %in% drop2)]
+```
+
+
+```{r}
+tree <- tree(is_canceled ~ ., train_data)
+
+summary(tree)
+plot(tree)
+text(tree,pretty=0)
+
+```
+
+Let’s use cross validation to see what size is optimal, and let’s prune accordingly.
+
+```{r}
+cv.tree <- cv.tree(tree, K = 5)
+plot(cv.tree$size, cv.tree$dev, type='b')
+
+```
+It looks like we don't need to prune the tree
+
+
+predict and examine the accuracy
+
+```{r}
+# make prediction and examine the accuracy 
+tree_pred <- ifelse(predict(tree,newdata = test_data)>0.5, 1, 0)
+table(tree_pred,test_data$is_canceled)
+
+#Overall Accuracy
+print("The overall accuracy is:")
+allacc(tree_pred, actual_test)
+
+#TPR
+print("The TPR is:")
+TPR(tree_pred, actual_test)
+
+#TNR
+print("The TNR is:")
+TNR(tree_pred, actual_test)
+
+```
+
+Plot ROC curve and calculate the AUC
+
+```{r}
+tree.roc <- roc(test_data$is_canceled,tree_pred, direction="<")
+tree.roc
+plot(tree.roc, lwd=3)
+
+```
+
+
+
+

@@ -1,0 +1,870 @@
+---
+title: "Hotel Booking Demand - Cancellation Prediction - Association Rules, KNN, and Random Forest"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: 
+    latex_engine: xelatex
+---
+
+# Kaggle Dataset - "Hotel booking demand"
+
+Source: https://www.kaggle.com/jessemostipak/hotel-booking-demand
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message = FALSE, warning = FALSE}
+# Load libraries 
+
+library(DataExplorer)
+library(knitr)
+library(psych)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(ggthemes)
+library(corrplot)
+
+#install.packages("splus2R")
+library(splus2R)
+
+library(pROC)
+library(MASS)
+library(glmnet)
+library(e1071)
+library(randomForest)
+
+#install.packages("class")
+library(class)
+
+# install.packages("caret")
+library(caret)
+
+```
+
+```{r}
+rm(list = ls()) # clear the workspace
+setwd("~/Documents/MADISON/GREG/OTM714/Finals")
+
+#load(file="hoteldata.RData")
+
+```
+
+## 1. Access the Data Set
+
+```{r}
+# read in Hotel Booking Demand dataset
+
+hoteldata <- read.csv("hotel_bookings.csv")
+head(hoteldata)
+str(hoteldata)
+
+```
+
+## 2. Data Overview and Clean the Data
+
+```{r}
+
+# Create a new variable room_type_diff and drop reserved_room_type and assigned_room_type
+
+hoteldata$room_type_diff <- ifelse(hoteldata$reserved_room_type == hoteldata$assigned_room_type,1,0)
+
+hoteldata <- subset(hoteldata, select = -c(reserved_room_type,assigned_room_type)) 
+
+# convert variables to factors
+hoteldata$room_type_diff  <- as.factor(hoteldata$room_type_diff)
+
+#==============================================================================
+
+# convert variables to factors
+
+hoteldata$is_canceled <- as.factor(hoteldata$is_canceled)
+
+hoteldata$arrival_date_year <- as.factor(hoteldata$arrival_date_year)
+hoteldata$arrival_date_week_number <- as.factor(hoteldata$arrival_date_week_number)
+hoteldata$arrival_date_day_of_month <- as.factor(hoteldata$arrival_date_day_of_month)
+
+hoteldata$is_repeated_guest <- as.factor(hoteldata$is_repeated_guest)
+
+
+# convert "reservation_status_date" variable to year/month/day of month
+
+date_list <- as.POSIXlt(hoteldata$reservation_status_date, format = "%Y-%m-%d")
+# unclass(date_list[1])
+
+# Taking a look at the output
+
+# date_list$year[1:10]  # years since 1900
+# date_list$mon[1:10]   # 0(Jan)-11(Dec): months after the first of the year
+# date_list$mday[1:10]  # date of month
+
+hoteldata$reservation_status_date_year <- date_list$year+1900
+hoteldata$reservation_status_date_month <- date_list$mon
+hoteldata$reservation_status_date_mday <- date_list$mday
+
+# convert the reservation_status_date to factors 
+
+hoteldata$reservation_status_date_year <- as.factor(hoteldata$reservation_status_date_year)
+hoteldata$reservation_status_date_month <- as.factor(hoteldata$reservation_status_date_month)
+hoteldata$reservation_status_date_mday <- as.factor(hoteldata$reservation_status_date_mday)
+
+# remove initial "reservation_status_date" variable
+hoteldata <- subset(hoteldata, select = -c(reservation_status_date)) 
+
+
+# convert all other character variables to factors
+hoteldata <- mutate_if(hoteldata, is.character, as.factor)   
+
+str(hoteldata)
+summary(hoteldata)
+
+# check missing data
+
+missingdata <- hoteldata %>% 
+  summarise_all(list(~ mean(is.na(.))))
+
+missingdata
+#kable(missingdata)
+
+plot_missing(hoteldata)
+# There are 4 missing values in the variable "children"
+
+```
+
+## 3. Impute Missing and Undefined Values
+
+```{r}
+#==============================================================================
+# (1) Missing Values - "children"
+#==============================================================================
+
+# There are 4 missing values in the variable "children".
+# We decided to replace the missing values in "children" column with corresponding values in "babies" column
+
+hoteldata$children[is.na(hoteldata$children)] <- hoteldata$babies[is.na(hoteldata$children)] 
+
+#==============================================================================
+# (2) Undefined Values - "meal"
+#==============================================================================
+
+# According to the variable description, both "Undefined" and "SC" meal categories represent: no meal package.
+# So we replaced "Undefined" values with "SC".
+
+hoteldata$meal[hoteldata$meal=="Undefined"] <- "SC"
+hoteldata$meal <- factor(hoteldata$meal)
+
+summary(hoteldata)
+
+#==============================================================================
+# (3) Other Undefined Values and Null Values
+#==============================================================================
+
+# As there isn't enough information to impute other undefined and null values, 
+# we decided to categorize them as a factor for now.
+
+
+```
+
+## 5. Exploratory Data Analysis 
+
+```{r}
+
+# Exploratory Data Analysis through Tableau 
+
+# describeBy(hoteldata,hoteldata$is_canceled)
+
+#==============================================================================
+# Correlations
+#==============================================================================
+
+str(hoteldata)
+
+# numerical variables
+
+hotel_numcols <- hoteldata[, sapply(hoteldata, is.numeric)]
+hotel_faccols <- hoteldata[, sapply(hoteldata, is.factor)]
+
+cor_vars <- data.frame(as.numeric(hoteldata$is_canceled),hotel_numcols)
+correlations <- cor(cor_vars)
+corrplot(correlations,method = "number")
+# It seems no highly correlated numerical variables.
+
+```
+
+## 6. Feature Scaling and Data Splitting
+
+```{r}
+#  Scale the numerical columns
+
+hotel_numcols <- as.data.frame(scale(hotel_numcols, center = TRUE, scale = TRUE))
+
+scaled_hotel <- as.data.frame(c(hotel_faccols,hotel_numcols))
+
+str(scaled_hotel)
+summary(scaled_hotel)
+
+#--------------------------------------------------------------------------------
+
+# Data Profiling Report  (Include PCA)
+
+# create_report(scaled_hotel, y = "is_canceled")
+
+#==============================================================================
+# Data Splitting
+#==============================================================================
+
+# choose 75% training and 25% test sets
+
+set.seed(123)
+index <- sort(sample(1:nrow(scaled_hotel),round(0.75*nrow(scaled_hotel))))
+hoteltrain <- scaled_hotel[index,]
+hoteltest  <- scaled_hotel[-index,]
+
+# check the proportion of cancellation rate in initial data set, current training and test data
+
+round(prop.table(table(scaled_hotel$is_canceled)),digits = 2)
+
+round(prop.table(table(hoteltrain$is_canceled)),digits = 2)
+round(prop.table(table(hoteltest$is_canceled)),digits = 2)
+
+#--------------------------------------------------------------------------------
+
+# Drop "country", "agent", and "company" variables that have too many categories for modeling
+
+hoteltrain2 <- subset(hoteltrain, select = -c(country,agent,company)) 
+hoteltest2 <- subset(hoteltest, select = -c(country,agent,company)) 
+
+
+#--------------------------------------------------------------------------------
+
+# Drop "reservation_status", "reservation_status_date_year", and "reservation_status_date_month", and
+# "reservation_status_date_mday" variables 
+
+hoteltrain2 <- subset(hoteltrain2, select = -c(reservation_status,reservation_status_date_year,
+                                              reservation_status_date_month,reservation_status_date_mday)) 
+hoteltest2 <- subset(hoteltest2, select = -c(reservation_status,reservation_status_date_year,
+                                              reservation_status_date_month,reservation_status_date_mday)) 
+
+str(hoteltrain2)
+
+#==============================================================================
+# Performance functions
+#==============================================================================
+
+# Overall accuracy
+allacc <- function(yhat, y)  { (sum(yhat==y) / sum(y==0 | y==1)) }
+
+# True Positive Rate, Sensitivity
+TPR <- function(yhat, y)  { sum(yhat==1 & y==1 ) / sum(y==1) }
+
+# True Negative Rate, Specificity
+TNR <- function(yhat, y)  { sum(yhat==0 & y==0) / sum(y==0) }
+
+
+```
+
+## 7. Modeling: 
+
+Association Rules, K-Nearest Neighbors (KNN), Random Forest  
+
+### 7.1 Association Rules
+
+``` {r}
+arules_df <- data.frame(matrix(NA, nrow = nrow(hoteldata), ncol = 0))
+arules_df$hotel<-as.factor(hoteldata$hotel)
+arules_df$is_cancelled<-as.factor(hoteldata$is_canceled)
+arules_df$lead_time_type[hoteldata$lead_time<median(hoteldata$lead_time)]<-"Low"
+arules_df$lead_time_type[hoteldata$lead_time==median(hoteldata$lead_time)]<-"Medium"
+arules_df$lead_time_type[hoteldata$lead_time>median(hoteldata$lead_time)]<-"High"
+arules_df$lead_time_type<-as.factor(arules_df$lead_time_type)
+arules_df$arrival_date_year<-as.factor(hoteldata$arrival_date_year)
+arules_df$arrival_date_month<-as.factor(hoteldata$arrival_date_month)
+arules_df$arrival_date_week_number<-as.factor(hoteldata$arrival_date_week_number)
+arules_df$arrival_date_day_of_month<-as.factor(hoteldata$arrival_date_day_of_month)
+arules_df$stays_in_weekend_nights[hoteldata$stays_in_weekend_nights<median(hoteldata$stays_in_weekend_nights)]<-"Short Stay"
+arules_df$stays_in_weekend_nights[hoteldata$stays_in_weekend_nights==median(hoteldata$stays_in_weekend_nights)]<-"Normal"
+arules_df$stays_in_weekend_nights[hoteldata$stays_in_weekend_nights>median(hoteldata$stays_in_weekend_nights)]<-"Long Stay"
+arules_df$stays_in_weekend_nights<-as.factor(arules_df$stays_in_weekend_nights)
+arules_df$stays_in_week_nights[hoteldata$stays_in_week_nights<median(hoteldata$stays_in_week_nights)]<-"Short Stay"
+arules_df$stays_in_week_nights[hoteldata$stays_in_week_nights==median(hoteldata$stays_in_week_nights)]<-"Normal"
+arules_df$stays_in_week_nights[hoteldata$stays_in_week_nights>median(hoteldata$stays_in_week_nights)]<-"Long Stay"
+arules_df$stays_in_week_nights<-as.factor(arules_df$stays_in_week_nights)
+arules_df$adults<-as.factor(hoteldata$adults)
+arules_df$children<-as.factor(hoteldata$children)
+arules_df$babies<-as.factor(hoteldata$babies)
+arules_df$meal<-as.factor(hoteldata$meal)
+arules_df$country<-as.factor(hoteldata$country)
+arules_df$market_segment<-as.factor(hoteldata$market_segment)
+arules_df$distribution_channel<-as.factor(hoteldata$distribution_channel)
+arules_df$is_repeated_guest[hoteldata$is_repeated_guest==1]<-"Repeats"
+arules_df$is_repeated_guest[hoteldata$is_repeated_guest==0]<-"New"
+arules_df$is_repeated_guest<-as.factor(hoteldata$is_repeated_guest)
+arules_df$previous_cancellations[hoteldata$previous_cancellations == 1]<-"Yes"
+arules_df$previous_cancellations[hoteldata$previous_cancellations == 0]<-"No"
+arules_df$previous_cancellations<-as.factor(hoteldata$previous_cancellations)
+arules_df$previous_bookings_not_canceled[hoteldata$previous_bookings_not_canceled == 1]<-"Has Cancelled Before"
+arules_df$previous_bookings_not_canceled[hoteldata$previous_bookings_not_canceled == 0]<-"Has Not Cancelled Before"
+arules_df$previous_bookings_not_canceled<-as.factor(hoteldata$previous_bookings_not_canceled)
+arules_df$reserved_room_type<-as.factor(hoteldata$reserved_room_type)
+arules_df$assigned_room_type<-as.factor(hoteldata$assigned_room_type)
+arules_df$booking_changes[hoteldata$booking_changes == 0]<-"No Changes"
+arules_df$booking_changes[hoteldata$booking_changes <= median(hoteldata$booking_changes) && hoteldata$booking_changes > 0]<-"Some Changes"
+arules_df$booking_changes[hoteldata$booking_changes > median(hoteldata$booking_changes)]<-"A Lot of Changes"
+arules_df$booking_changes<-as.factor(hoteldata$booking_changes)
+arules_df$deposit_type<-as.factor(hoteldata$deposit_type)
+arules_df$days_in_waiting_list[hoteldata$days_in_waiting_list == 0]<-"Little"
+arules_df$days_in_waiting_list[hoteldata$days_in_waiting_list<=median(hoteldata$days_in_waiting_list)  && hoteldata$days_in_waiting_list > 0]<-"Average"
+arules_df$days_in_waiting_list[hoteldata$days_in_waiting_list>median(hoteldata$days_in_waiting_list)]<-"Long"
+arules_df$days_in_waiting_list<-as.factor(hoteldata$days_in_waiting_list)
+arules_df$customer_type<-as.factor(hoteldata$customer_type)
+arules_df$reservation_status<-as.factor(hoteldata$reservation_status)
+
+arules_df<-arules_df[1:25]
+View(arules_df)
+
+# Association rules will use the arules package
+install.packages("arules")
+library(arules)
+
+# In order to run the association rules algorithm, the data frame of factors needs to be converted to
+# a list of transactions.
+book_trans<-as(arules_df, "transactions")
+
+# The following line actually runs the algorithm to generate the rules
+# minlen is the minimum "length" of a rule allowed
+# A single antecedent implying a single consequent results in a length of 2
+# The other parameters give minimum levels required for the different metrics
+bookrules<-apriori(book_trans, parameter=list(supp=0.1, conf=0.1, minlen=2, maxlen=5))
+
+# We can get a summary, including the number of rules generated, with the following statement
+summary(bookrules)
+
+# There are many many rules - probably too many to manage
+# Let's subset them a bit to look at only interesting ones
+book_sub_rules<-subset(bookrules, subset = lift > 2 & support > 0.1)
+summary(book_sub_rules)
+
+# Rules for cancellations sort in descending order so that lastest results show first
+cancellations <- subset(book_sub_rules, subset = rhs %in% "is_cancelled=1" & lift > 1)
+summary(cancellations)
+cancellations<-sort(cancellations, decreasing=FALSE, by="lift")
+inspect(cancellations)
+
+# Rules for no cancellations sort in descending order so that lastest results show first
+no_cancellations <- subset(book_sub_rules, subset = rhs %in% "is_cancelled=0" & lift > 1)
+summary(no_cancellations)
+no_cancellations<-sort(no_cancellations, decreasing=FALSE, by="lift")
+inspect(no_cancellations)
+
+```
+
+
+### 7.2 K-Nearest Neighbors (KNN)
+
+```{r}
+#==============================================================================
+# K-Nearest Neighbors - We selected "k=11" in our final model.
+#==============================================================================
+
+# Use the dataset that excludes "country", "agent", and "company" for KNN model
+
+# Convert all categorical variables into dummy variables
+
+hoteltrain_KNN.x <- as.data.frame(model.matrix(is_canceled ~ ., hoteltrain2)[,-1])
+hoteltrain_KNN.x 
+
+hoteltest_KNN.x <- as.data.frame(model.matrix(is_canceled ~ ., hoteltest2)[,-1])
+hoteltest_KNN.x 
+
+# Scale the X variables to make them comparable for distance calculations
+
+scaled_hoteltrain_KNN.x <- scale(hoteltrain_KNN.x, center = TRUE, scale = TRUE)
+scaled_hoteltest_KNN.x <- scale(hoteltest_KNN.x, center = TRUE, scale = TRUE)
+
+train_knn <- as.data.frame(cbind(is_canceled=hoteltrain2$is_canceled, scaled_hoteltrain_KNN.x))
+test_knn <- as.data.frame(cbind(is_canceled=hoteltest2$is_canceled, scaled_hoteltest_KNN.x))
+
+# table(as.data.frame(scaled_hoteltrain_KNN.x)$market_segmentUndefined)
+# table(as.data.frame(scaled_hoteltest_KNN.x)$assigned_room_typeL)
+
+# As all market_segmentUndefined values in the hoteltrain_KNN.x are 0s, the scaled values would be NaN.
+# We replaced the NaN value of "market_segmentUndefined" with 0s.
+train_knn$market_segmentUndefined <- 0
+
+# As all assigned_room_typeL values in the hoteltest_KNN.x are 0s, the scaled values would be NaN.
+# We replaced the NaN value of "assigned_room_typeL" with 0s.
+# test_knn$assigned_room_typeL <- 0
+# 
+# str(train_knn)
+# str(test_knn)
+
+#------------------------------------------------------------------------------
+
+# Train KNN model using knn() with k=3
+
+# k=3 seems better in terms of sensitivity
+
+set.seed(123)
+pred.knn1 <- knn(train_knn[-1] , test_knn[-1], hoteltrain2$is_canceled, k=3)  
+
+
+# create a confusion matrix
+
+table(pred.knn1, hoteltest2$is_canceled)   # pred vs. actual
+
+
+# Overall accuracy
+
+allacc(pred.knn1, hoteltest2$is_canceled) 
+# 3: 0.7897012
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.knn1, hoteltest2$is_canceled)    
+# 3: 0.7016848
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.knn1, hoteltest2$is_canceled)    
+# 3: 0.8418049
+
+#------------------------------------------------------------------------------
+
+# Train KNN model using knn() with k=5
+
+set.seed(123)
+pred.knn2 <- knn(train_knn[-1] , test_knn[-1], hoteltrain2$is_canceled, k=5)  
+
+
+# create a confusion matrix
+
+table(pred.knn2, hoteltest2$is_canceled)   # pred vs. actual
+
+
+# Overall accuracy
+
+allacc(pred.knn2, hoteltest2$is_canceled) 
+# 5: 0.7896676
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.knn2, hoteltest2$is_canceled)    
+# 5: 0.6806019
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.knn2, hoteltest2$is_canceled)    
+# 5: 0.8542322
+
+#------------------------------------------------------------------------------
+
+# Train KNN model using knn() with k=7
+
+set.seed(123)
+pred.knn3 <- knn(train_knn[-1] , test_knn[-1], hoteltrain2$is_canceled, k=7)  
+
+
+# create a confusion matrix
+
+table(pred.knn3, hoteltest2$is_canceled)   # pred vs. actual
+
+# Overall accuracy
+
+allacc(pred.knn3, hoteltest2$is_canceled) 
+# 7: 0.7850777
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.knn3, hoteltest2$is_canceled) 
+# 7: 0.6583476
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.knn3, hoteltest2$is_canceled) 
+# 7: 0.8600992
+
+#------------------------------------------------------------------------------
+
+# Train KNN model using knn() with k=9
+
+set.seed(123)
+pred.knn4 <- knn(train_knn[-1] , test_knn[-1], hoteltrain2$is_canceled, k=9)  
+
+
+# create a confusion matrix
+
+table(pred.knn4, hoteltest2$is_canceled)   # pred vs. actual
+
+
+# Overall accuracy
+
+allacc(pred.knn4, hoteltest2$is_canceled) 
+# 9: 0.7808228
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.knn4, hoteltest2$is_canceled)    
+# 9: 0.640328
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.knn4, hoteltest2$is_canceled)    
+# 9: 0.8639927
+
+#------------------------------------------------------------------------------
+
+# Train KNN model using knn() with k=11
+
+set.seed(123)
+pred.knn5 <- knn(train_knn[-1] , test_knn[-1], hoteltrain2$is_canceled, k=11)  
+
+
+# create a confusion matrix
+
+table(pred.knn5, hoteltest2$is_canceled)   # pred vs. actual
+
+
+# Overall accuracy
+
+allacc(pred.knn5, hoteltest2$is_canceled) 
+# 11: 0.7782096
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.knn5, hoteltest2$is_canceled)    
+# 11: 0.6291558
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.knn5, hoteltest2$is_canceled)    
+# 11: 0.8664462
+
+
+#------------------------------------------------------------------------------
+
+# Train KNN model using knn() with k=13
+
+set.seed(123)
+pred.knn6 <- knn(train_knn[-1] , test_knn[-1], hoteltrain2$is_canceled, k=13)  
+
+
+# create a confusion matrix
+
+table(pred.knn6, hoteltest2$is_canceled)   # pred vs. actual
+
+
+# Overall accuracy
+
+allacc(pred.knn6, hoteltest2$is_canceled) 
+# 13: 0.7749598
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.knn6, hoteltest2$is_canceled)    
+# 13: 0.6169024
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.knn6, hoteltest2$is_canceled)    
+# 13: 0.8685263
+
+#------------------------------------------------------------------------------
+
+# Train KNN model using knn() with k=15
+
+set.seed(123)
+pred.knn7 <- knn(train_knn[-1] , test_knn[-1], hoteltrain2$is_canceled, k=15)  
+
+
+# create a confusion matrix
+
+table(pred.knn7, hoteltest2$is_canceled)   # pred vs. actual
+
+
+# Overall accuracy
+
+allacc(pred.knn7, hoteltest2$is_canceled) 
+# 15: 0.7719445
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.knn7, hoteltest2$is_canceled)    
+# 15: 0.6041085
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.knn7, hoteltest2$is_canceled)    
+# 15: 0.8712998
+
+#------------------------------------------------------------------------------
+
+# Train KNN model using knn() with k=17
+
+set.seed(123)
+pred.knn8 <- knn(train_knn[-1] , test_knn[-1], hoteltrain2$is_canceled, k=17)  
+
+
+# create a confusion matrix
+
+table(pred.knn8, hoteltest2$is_canceled)   # pred vs. actual
+
+
+# Overall accuracy
+
+allacc(pred.knn8, hoteltest2$is_canceled) 
+# 17: 0.7694653
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.knn8, hoteltest2$is_canceled)    
+# 17: 0.5989729
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.knn8, hoteltest2$is_canceled)    
+# 17: 0.8703931
+
+#------------------------------------------------------------------------------
+
+# Train KNN model using knn() with k=19
+
+set.seed(123)
+pred.knn9 <- knn(train_knn[-1] , test_knn[-1], hoteltrain2$is_canceled, k=19)  
+
+
+# create a confusion matrix
+
+table(pred.knn9, hoteltest2$is_canceled)   # pred vs. actual
+
+
+# Overall accuracy
+
+allacc(pred.knn9, hoteltest2$is_canceled) 
+# 19: 0.7671536
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.knn9, hoteltest2$is_canceled)    
+# 19: 0.5933868
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.knn9, hoteltest2$is_canceled)    
+# 19: 0.8700197
+
+```
+
+
+### 7.2 Random Forest
+
+```{r}
+#==============================================================================
+# Random Forest - We chose rf3: ntree = 300, mtry = 5, cutoff=0.6 as our final model
+#==============================================================================
+
+# As random forest can not handle categorical predictors with more than 53 categories, 
+# we decided to use all variables without "country", "agent", and "company" for simplification.
+
+#--------------------------------------------------------------------------------
+# rf1 - ntree = 800
+#--------------------------------------------------------------------------------
+
+# Fit a random forest to the data
+
+memory.limit()
+
+xvars <- names(hoteltrain2)[-2]
+mtry <- round(length(xvars)^.5)  # 5
+ntree <- 800
+
+
+set.seed(652)
+rf1 <- randomForest(is_canceled ~ ., data = hoteltrain2, ntree=ntree, mtry=mtry, importance=TRUE)
+rf1
+
+plot(rf1)
+# The black curve is overall Out-of-Bag error rate
+
+
+# Check which variables are most important in driving the predictions
+
+importance(rf1)
+#varImpPlot(rf1)
+
+# Make the plot more readable
+dotchart(sort(importance(rf1)[,3]), xlim=c(0,400), xlab="MeanDecreaseAccuracy")
+dotchart(sort(importance(rf1)[,4]), xlim=c(0,6000), xlab="MeanDecreaseGini")
+
+#--------------------------------------------------------------------------------
+
+# Evaluate predictions
+
+yhat.rf1 <- predict(rf1, hoteltest2, type="prob")[,2]
+
+pred.rf1 <- rep(0, nrow(hoteltest2))
+pred.rf1[yhat.rf1 > 0.5] <- 1  # 50% threshold
+
+# create a confusion matrix
+
+table(pred.rf1, hoteltest2$is_canceled)   # pred vs. actual
+
+# Overall accuracy
+
+allacc(pred.rf1 , hoteltest2$is_canceled)  
+# 0.5: 0.8667917
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.rf1 , hoteltest2$is_canceled)  
+# 0.5: 0.7809713
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.rf1 , hoteltest2$is_canceled) 
+# 0.5: 0.9175956
+
+
+# AUC
+
+rf1.roc <- roc(hoteltest2$is_canceled, yhat.rf1, direction="<")
+rf1.roc  # Area under the curve: 0.9313
+
+#--------------------------------------------------------------------------------
+# rf2 - ntree = 500
+#--------------------------------------------------------------------------------
+
+xvars <- names(hoteltrain2)[-2]
+mtry <- round(length(xvars)^.5)
+ntree <- 500
+
+set.seed(652)
+rf2 <- randomForest(is_canceled ~ ., data = hoteltrain2, ntree=ntree, mtry=mtry, importance=TRUE)
+rf2
+
+plot(rf2)
+# The black curve is overall Out-of-Bag error rate
+
+# Check which variables are most important in driving the predictions
+
+importance(rf2)
+#varImpPlot(rf2)
+
+# Make the plot more readable
+dotchart(sort(importance(rf2)[,3]), xlim=c(0,300), xlab="MeanDecreaseAccuracy")
+dotchart(sort(importance(rf2)[,4]), xlim=c(0,6000), xlab="MeanDecreaseGini")
+
+#--------------------------------------------------------------------------------
+
+# Evaluate predictions
+
+yhat.rf2 <- predict(rf2, hoteltest2, type="prob")[,2]
+
+pred.rf2 <- rep(0, nrow(hoteltest2))
+pred.rf2[yhat.rf2 > 0.5] <- 1 
+
+# create a confusion matrix
+
+table(pred.rf2, hoteltest2$is_canceled)   # pred vs. actual
+
+# Overall accuracy
+
+allacc(pred.rf2 , hoteltest2$is_canceled)  
+# 0.5: 0.8666577/ 0.6: 0.8641115
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.rf2 , hoteltest2$is_canceled)   
+# 0.5: 0.7808812/ 0.6: 0.7198847
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.rf2 , hoteltest2$is_canceled) 
+# 0.5:  0.9174356 / 0.6: 0.9494906
+
+
+# AUC
+
+rf2.roc <- roc(hoteltest2$is_canceled, yhat.rf2, direction="<")
+rf2.roc  # Area under the curve: 0.9312
+
+
+#--------------------------------------------------------------------------------
+# rf3 - ntree = 300
+#--------------------------------------------------------------------------------
+
+xvars <- names(hoteltrain2)[-2]
+mtry <- round(length(xvars)^.5)
+ntree <- 300
+
+set.seed(652)
+rf3 <- randomForest(is_canceled ~ ., data = hoteltrain2, ntree=ntree, mtry=mtry, importance=TRUE)
+rf3
+
+plot(rf3)
+# The black curve is overall Out-of-Bag error rate
+
+
+# Check which variables are most important in driving the predictions
+
+importance(rf3)
+#varImpPlot(rf3)
+
+# Make the plot more readable
+dotchart(sort(importance(rf3)[,3]), xlim=c(0,220), xlab="MeanDecreaseAccuracy")
+dotchart(sort(importance(rf3)[,4]), xlim=c(0,6000), xlab="MeanDecreaseGini")
+
+#--------------------------------------------------------------------------------
+
+# Evaluate predictions
+
+yhat.rf3 <- predict(rf3, hoteltest2, type="prob")[,2]
+
+pred.rf3 <- rep(0, nrow(hoteltest2))
+pred.rf3[yhat.rf3 > 0.6] <- 1  # 50% threshold
+
+# create a confusion matrix
+
+table(pred.rf3, hoteltest2$is_canceled)   # pred vs. actual
+
+# Overall accuracy
+
+allacc(pred.rf3 , hoteltest2$is_canceled)  
+# 0.4: 0.8558362 / 0.5: 0.8673278 / 0.6: 0.864078 / 0.7: 0.8526869
+
+# Sensitivity: probability of getting a positive classification
+
+TPR(pred.rf3 , hoteltest2$is_canceled)  
+# 0.4: 0.8368321 / 0.5: 0.7815118 / 0.6: 0.7199748 / 0.7: 0.6528516
+
+# Specificity: probability of getting a negative classification
+
+TNR(pred.rf3 , hoteltest2$is_canceled) 
+# 0.4: 0.8670862 / 0.5: 0.918129 / 0.6: 0.949384/ 0.7: 0.9709851
+
+
+# AUC
+
+rf3.roc <- roc(hoteltest2$is_canceled, yhat.rf3, direction="<")
+rf3.roc  # Area under the curve: 0.9309
+
+
+#--------------------------------------------------------------------------------
+# Tune random forest model - mtry 
+#--------------------------------------------------------------------------------
+
+# We selected 300 trees and tune mtry
+
+tune <- tuneRF(hoteltrain2[,-2], hoteltrain2[,2], stepFactor = 0.5, plot = TRUE, ntreeTry = 300,
+       trace = TRUE, improve = 0.05)
+tune
+# It seems that our initial value of mtry (=5) is the optimal one.
+
+```
+
+```{r}
+save.image(file="hoteldata.RData")
+
+```
+
